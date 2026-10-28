@@ -242,6 +242,18 @@ class Api:
                     )
         return found
 
+    def last_in_progress(self):
+        res = self.call("GET", "/api/me")
+        best = None
+        for prog in res.get("mediaProgress") or []:
+            if prog.get("isFinished") or prog.get("episodeId") or not prog.get("libraryItemId"):
+                continue
+            if not (prog.get("currentTime") or prog.get("progress")):
+                continue
+            if best is None or (prog.get("lastUpdate") or 0) > (best.get("lastUpdate") or 0):
+                best = prog
+        return best["libraryItemId"] if best else ""
+
     def play(self, item_id):
         body = {
             "deviceInfo": {
@@ -449,10 +461,20 @@ class Controller:
         if not self.ensure_ready():
             return
         d = self.data
-        if d["item_id"]:
-            self.start_item(d["item_id"], None, d["title"], d["author"])
-        else:
+        item_id = ""
+        try:
+            item_id = self.api.last_in_progress()
+        except (AuthError, ApiError) as exc:
+            log.info("could not read progress: %s", exc)
+        if not item_id:
+            item_id = d["item_id"]
+        if not item_id:
             self.ask_search()
+            return
+        if item_id == d["item_id"]:
+            self.start_item(item_id, None, d["title"], d["author"])
+        else:
+            self.start_item(item_id)
 
     def pause(self):
         with self.lock:

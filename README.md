@@ -9,8 +9,8 @@ It talks to the Audiobookshelf REST API directly and plays the stream through mp
 - Tray icon toggles Play/Pause on left-click (middle-click on GNOME), and the book icon shows the state (grey idle, blue loading, green playing, amber paused)
 - First Play asks for your server URL, then your username and password, and saves them locally
 - If you typed an address without http:// or https://, https:// is assumed
-- Play resumes the book you were listening to from its saved position
-- With no book in progress, Play opens a search box so you can find a book by title
+- Play resumes your most recent in-progress book on the server from its saved position, even if you last listened on another device
+- With nothing in progress, Play opens a search box so you can find a book by title
 - Right-click menu: Play/Pause, Search, Next, Previous, Now Playing, Quit
 - Next and Previous jump to the next and previous chapter
 - Now Playing shows a popup with the cover art, title and author
