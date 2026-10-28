@@ -414,6 +414,16 @@ class Controller:
     def now_title(self):
         return self.title or self.data.get("title") or ""
 
+    def percent(self):
+        with self.lock:
+            if self.session is not None:
+                pos, dur = self.last_pos, self.duration
+            else:
+                pos, dur = self.data.get("position") or 0.0, self.data.get("duration") or 0.0
+        if not dur or dur <= 0:
+            return None
+        return max(0, min(100, int(pos / dur * 100)))
+
     def _changed(self):
         try:
             self.on_change()
@@ -2067,6 +2077,53 @@ class App:
             except Exception:
                 log.exception("popup failed")
 
+    def title_with_percent(self):
+        title = self.ctl.now_title()
+        if not title:
+            return ""
+        pct = self.ctl.percent()
+        return f"{title} ({pct}%)" if pct is not None else title
+
+    def now_playing_text(self):
+        title = self.title_with_percent()
+        if not title:
+            return "Now Playing: nothing"
+        title = title.replace("&", "&&")
+        if len(title) > 64:
+            title = title[:61] + "..."
+        return f"Now Playing: {title}"
+
+    def tooltip(self):
+        title = self.title_with_percent()
+        return f"{APP}: {title}"[:120] if title else APP
+
+    def animate(self):
+        ticks = 0
+        while not self.ctl.stop_flag.wait(0.3):
+            ticks += 1
+            if ticks % 10 == 0 and self.current_theme() == "auto":
+                dark = detect_system_dark()
+                if dark != self.system_dark:
+                    self.system_dark = dark
+                    try:
+                        self.set_icon(self.current_kind(), self.frame)
+                    except Exception:
+                        log.exception("theme switch failed")
+            if ticks % 50 == 0 and self.ctl.status in ("playing", "paused"):
+                try:
+                    self.icon.title = self.tooltip()
+                    self.icon.update_menu()
+                except Exception:
+                    log.exception("menu refresh failed")
+            if self.ctl.status != "loading":
+                self.frame = 0
+                continue
+            self.frame = (self.frame + 1) % 3
+            try:
+                self.set_icon("loading", self.frame)
+            except Exception:
+                log.exception("animation failed")
+
     def on_now_playing(self, icon=None, item=None):
         d = self.store.data
         if d.get("item_id"):
@@ -2194,19 +2251,6 @@ class App:
 
         return action
 
-    def now_playing_text(self):
-        title = self.ctl.now_title()
-        if not title:
-            return "Now Playing: nothing"
-        title = title.replace("&", "&&")
-        if len(title) > 60:
-            title = title[:57] + "..."
-        return f"Now Playing: {title}"
-
-    def tooltip(self):
-        title = self.ctl.now_title()
-        return f"{APP}: {title}"[:120] if title else APP
-
     def refresh(self):
         status = self.ctl.status
         kind = status if status in ICON_COLORS else "idle"
@@ -2237,27 +2281,6 @@ class App:
         if key not in self.images:
             self.images[key] = make_icon_image(kind, theme, key[2])
         self.icon.icon = self.images[key]
-
-    def animate(self):
-        ticks = 0
-        while not self.ctl.stop_flag.wait(0.3):
-            ticks += 1
-            if ticks % 10 == 0 and self.current_theme() == "auto":
-                dark = detect_system_dark()
-                if dark != self.system_dark:
-                    self.system_dark = dark
-                    try:
-                        self.set_icon(self.current_kind(), self.frame)
-                    except Exception:
-                        log.exception("theme switch failed")
-            if self.ctl.status != "loading":
-                self.frame = 0
-                continue
-            self.frame = (self.frame + 1) % 3
-            try:
-                self.set_icon("loading", self.frame)
-            except Exception:
-                log.exception("animation failed")
 
     def install_mac_click(self):
         import AppKit
