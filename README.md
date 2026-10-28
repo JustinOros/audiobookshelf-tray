@@ -34,7 +34,7 @@ Then left-click the tray icon:
 2. Type your Audiobookshelf username and password
 3. Search for a book by title and it starts playing
 
-After that, clicking Play simply resumes the last book. Use Sign out in the menu to forget the server and login.
+After that, clicking Play simply resumes the last book. Use Sign out in the menu to forget the server and login, and Sign in (or Play) to enter them again.
 
 Your password is stored in `state.json` in the folder listed under Files, readable only by your account where the OS supports it. The app uses it to sign in again whenever the server expires your login.
 

@@ -22,6 +22,7 @@ SYNC_INTERVAL = 15.0
 STALL_SECONDS = 15.0
 LOAD_GRACE_SECONDS = 20.0
 MAX_RECOVERIES = 4
+RESYNC_SECONDS = 10.0
 INSTANCE_PORT = 47654
 USER_AGENT = "audiobookshelf-tray/" + VERSION
 MIME_TYPES = [
@@ -242,7 +243,7 @@ class Api:
                     )
         return found
 
-    def last_in_progress(self):
+    def latest_progress(self):
         res = self.call("GET", "/api/me")
         best = None
         for prog in res.get("mediaProgress") or []:
@@ -252,7 +253,12 @@ class Api:
                 continue
             if best is None or (prog.get("lastUpdate") or 0) > (best.get("lastUpdate") or 0):
                 best = prog
-        return best["libraryItemId"] if best else ""
+        if best is None:
+            return {"id": "", "time": 0.0}
+        return {"id": best["libraryItemId"], "time": float(best.get("currentTime") or 0)}
+
+    def last_in_progress(self):
+        return self.latest_progress()["id"]
 
     def play(self, item_id):
         body = {
@@ -273,7 +279,10 @@ class Api:
         self.call("POST", f"/api/session/{session_id}/sync", body)
 
     def close(self, session_id, current, listened, duration):
-        body = {"currentTime": current, "timeListened": listened, "duration": duration}
+        if current is None:
+            body = {}
+        else:
+            body = {"currentTime": current, "timeListened": listened, "duration": duration}
         self.call("POST", f"/api/session/{session_id}/close", body, timeout=10)
 
     def finish(self, item_id):
@@ -403,6 +412,8 @@ class Controller:
         self.resume_from = 0.0
         self.last_save = 0.0
         self.last_announced = None
+        self.resuming = False
+        self.stale_session = False
         self.stop_flag = threading.Event()
         self.thread = threading.Thread(target=self._watchdog, daemon=True)
         self.thread.start()
@@ -416,6 +427,8 @@ class Controller:
 
     def percent(self):
         with self.lock:
+            if self.status == "loading":
+                return None
             if self.session is not None:
                 pos, dur = self.last_pos, self.duration
             else:
@@ -502,24 +515,54 @@ class Controller:
 
     def resume(self):
         with self.lock:
-            if self.session is None or self.session_expired:
-                self.start_item(
-                    self.data["item_id"], self.last_pos if self.last_pos > 0 else None
-                )
+            if self.resuming:
                 return
+            self.resuming = True
+        threading.Thread(target=self._resume_worker, daemon=True).start()
+
+    def _resume_worker(self):
+        try:
+            latest = None
             try:
-                self.player.pause = False
-            except Exception:
-                self.start_item(
-                    self.data["item_id"], self.last_pos if self.last_pos > 0 else None
-                )
-                return
-            now = time.time()
-            self.status = "playing"
-            self.progress_at = now
-            self.progress_pos = None
-            self.tick_at = now
-            self._changed()
+                latest = self.api.latest_progress()
+            except (AuthError, ApiError) as exc:
+                log.info("could not read progress: %s", exc)
+            with self.lock:
+                if self.status != "paused":
+                    return
+                item = self.data["item_id"]
+                known = bool(latest and latest["id"])
+                if known and latest["id"] != item:
+                    self.stale_session = True
+                    self.title = "Loading..."
+                    self.start_item(latest["id"])
+                    return
+                if (
+                    known
+                    and self.session is not None
+                    and abs(latest["time"] - self.last_pos) > RESYNC_SECONDS
+                ):
+                    self.stale_session = True
+                    self.start_item(item)
+                    return
+                if self.session is None or self.session_expired:
+                    self.start_item(
+                        item, None if known else (self.last_pos if self.last_pos > 0 else None)
+                    )
+                    return
+                try:
+                    self.player.pause = False
+                except Exception:
+                    self.start_item(item, self.last_pos if self.last_pos > 0 else None)
+                    return
+                now = time.time()
+                self.status = "playing"
+                self.progress_at = now
+                self.progress_pos = None
+                self.tick_at = now
+                self._changed()
+        finally:
+            self.resuming = False
 
     def search_and_play(self, query):
         query = (query or "").strip()
@@ -596,7 +639,7 @@ class Controller:
         with self.lock:
             if gen != self.gen or self.stop_flag.is_set():
                 if session is not None:
-                    self._close_async(session.get("id"), 0.0, 0.0, 0.0)
+                    self._close_async(session.get("id"), 0.0, 0.0, 0.0, False)
                 return
             if session is None:
                 self._fail(error or ApiError("could not open the book"))
@@ -610,7 +653,15 @@ class Controller:
     def _adopt(self, session, item_id, position):
         old = self.session
         if old is not None:
-            self._close_async(old.get("id"), self.last_pos, self.listened, self.duration)
+            stale = self.stale_session
+            self._close_async(
+                old.get("id"),
+                self.last_pos,
+                self.listened,
+                self.duration,
+                self.listened > 0 and not stale,
+            )
+        self.stale_session = False
         tracks = []
         raw_tracks = sorted(session.get("audioTracks") or [], key=lambda t: t.get("index") or 0)
         for t in raw_tracks:
@@ -627,7 +678,7 @@ class Controller:
                 }
             )
         if not tracks:
-            self._close_async(session.get("id"), 0.0, 0.0, 0.0)
+            self._close_async(session.get("id"), 0.0, 0.0, 0.0, False)
             self._fail(ApiError("this book has no audio files"))
             return
         chapters = []
@@ -744,7 +795,7 @@ class Controller:
         item_id = self.data["item_id"]
         title = self.title
         sid = self.session.get("id") if self.session else None
-        self._close_async(sid, self.duration, self.listened, self.duration)
+        self._close_async(sid, self.duration, self.listened, self.duration, True)
         threading.Thread(target=self._mark_finished, args=(item_id,), daemon=True).start()
         self.session = None
         self.session_expired = False
@@ -769,16 +820,19 @@ class Controller:
         except Exception as exc:
             log.info("could not mark finished: %s", exc)
 
-    def _close_async(self, sid, pos, listened, duration):
+    def _close_async(self, sid, pos, listened, duration, sync):
         if not sid:
             return
         threading.Thread(
-            target=self._close_session, args=(sid, pos, listened, duration), daemon=True
+            target=self._close_session, args=(sid, pos, listened, duration, sync), daemon=True
         ).start()
 
-    def _close_session(self, sid, pos, listened, duration):
+    def _close_session(self, sid, pos, listened, duration, sync):
         try:
-            self.api.close(sid, pos, listened, duration)
+            if sync:
+                self.api.close(sid, pos, listened, duration)
+            else:
+                self.api.close(sid, None, 0.0, 0.0)
         except Exception as exc:
             log.info("session close skipped: %s", exc)
 
@@ -900,7 +954,11 @@ class Controller:
             self.gen += 1
             if self.session is not None:
                 self._close_async(
-                    self.session.get("id"), self.last_pos, self.listened, self.duration
+                    self.session.get("id"),
+                    self.last_pos,
+                    self.listened,
+                    self.duration,
+                    self.listened > 0,
                 )
             try:
                 self.player.command("stop")
@@ -1026,7 +1084,9 @@ class Controller:
             pos, listened, duration = self.last_pos, self.listened, self.duration
         if sid:
             t = threading.Thread(
-                target=self._close_session, args=(sid, pos, listened, duration), daemon=True
+                target=self._close_session,
+                args=(sid, pos, listened, duration, listened > 0),
+                daemon=True,
             )
             t.start()
             t.join(4)
@@ -2014,9 +2074,8 @@ class App:
                 ),
             ),
             ps.MenuItem(
-                "Sign out",
+                lambda item: "Sign out" if self.signed_in() else "Sign in",
                 self.on_sign_out,
-                enabled=lambda item: bool(self.store.data.get("server")),
             ),
             ps.Menu.SEPARATOR,
             ps.MenuItem("Quit", self.on_quit),
@@ -2181,8 +2240,15 @@ class App:
     def on_previous(self, icon=None, item=None):
         self.ctl.previous()
 
+    def signed_in(self):
+        d = self.store.data
+        return bool(d.get("server") and d.get("username") and d.get("password"))
+
     def on_sign_out(self, icon=None, item=None):
-        self.ctl.sign_out()
+        if self.signed_in():
+            self.ctl.sign_out()
+        else:
+            threading.Thread(target=self.ctl.ensure_ready, daemon=True).start()
 
     def on_quit(self, icon=None, item=None):
         self.ctl.shutdown()
