@@ -1036,6 +1036,20 @@ class Controller:
             pass
 
 
+def hide_dock_icon(activate=False):
+    if sys.platform != "darwin":
+        return
+    try:
+        import AppKit
+
+        app = AppKit.NSApplication.sharedApplication()
+        app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        if activate:
+            app.activateIgnoringOtherApps_(True)
+    except Exception:
+        log.info("could not hide dock icon", exc_info=True)
+
+
 def form_main(title, fields, button):
     import tkinter as tk
 
@@ -1047,6 +1061,7 @@ def form_main(title, fields, button):
     bg, fg, field, btn, sel = "#202020", "#f0f0f0", "#2d2d2d", "#3a3a3a", "#0a64ad"
     result = {"values": None}
     root = tk.Tk()
+    hide_dock_icon(True)
     root.title(title)
     root.resizable(False, False)
     if dark:
@@ -2354,6 +2369,7 @@ class App:
                     self.install_mac_click()
                 except Exception:
                     log.exception("mac click handling failed, using default menu click")
+            hide_dock_icon()
             icon.visible = True
             self.refresh()
             if sys.platform == "win32":
