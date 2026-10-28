@@ -23,6 +23,7 @@ STALL_SECONDS = 15.0
 LOAD_GRACE_SECONDS = 20.0
 MAX_RECOVERIES = 4
 RESYNC_SECONDS = 10.0
+SPEEDS = (0.70, 1.00, 1.20, 1.50, 1.70, 2.00)
 INSTANCE_PORT = 47654
 USER_AGENT = "audiobookshelf-tray/" + VERSION
 MIME_TYPES = [
@@ -75,6 +76,7 @@ DEFAULT_STATE = {
     "theme": "auto",
     "notifications": True,
     "pin_icon": True,
+    "speed": 1.0,
     "item_id": "",
     "title": "",
     "author": "",
@@ -102,7 +104,11 @@ class Store:
         try:
             self.data["position"] = float(self.data["position"] or 0.0)
             self.data["duration"] = float(self.data["duration"] or 0.0)
+            self.data["speed"] = float(self.data["speed"] or 1.0)
+            if not 0.25 <= self.data["speed"] <= 4.0:
+                self.data["speed"] = 1.0
         except (TypeError, ValueError):
+            self.data["speed"] = 1.0
             self.data["position"] = 0.0
             self.data["duration"] = 0.0
 
@@ -422,6 +428,20 @@ class Controller:
     def data(self):
         return self.store.data
 
+    @property
+    def speed(self):
+        return float(self.data.get("speed") or 1.0)
+
+    def set_speed(self, value):
+        with self.lock:
+            self.data["speed"] = float(value)
+            self.store.save()
+            try:
+                self.player.speed = float(value)
+            except Exception:
+                log.exception("could not set speed")
+            self._changed()
+
     def now_title(self):
         return self.title or self.data.get("title") or ""
 
@@ -736,6 +756,10 @@ class Controller:
     def _load_track(self, idx, offset):
         track = self.tracks[idx]
         self.player.pause = False
+        try:
+            self.player.speed = self.speed
+        except Exception:
+            log.warning("could not set speed")
         self.player["start"] = f"{offset:.2f}" if offset > 1 else "none"
         token = self.data.get("token") or ""
         try:
@@ -2037,6 +2061,20 @@ class App:
                 enabled=lambda item: bool(self.store.data.get("item_id")),
             ),
             ps.MenuItem(
+                "Speed",
+                ps.Menu(
+                    *[
+                        ps.MenuItem(
+                            f"{v:.2f}x (Default)" if v == 1.0 else f"{v:.2f}x",
+                            self.make_speed_action(v),
+                            checked=lambda item, v=v: abs(self.ctl.speed - v) < 0.001,
+                            radio=True,
+                        )
+                        for v in SPEEDS
+                    ]
+                ),
+            ),
+            ps.MenuItem(
                 "Notifications",
                 ps.Menu(
                     ps.MenuItem(
@@ -2150,6 +2188,12 @@ class App:
                 )
             except Exception:
                 log.exception("popup failed")
+
+    def make_speed_action(self, value):
+        def action(icon=None, item=None):
+            self.ctl.set_speed(value)
+
+        return action
 
     def title_with_percent(self):
         title = self.ctl.now_title()
