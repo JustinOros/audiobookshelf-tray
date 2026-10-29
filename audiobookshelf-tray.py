@@ -4,6 +4,7 @@ import json
 import locale
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
 from pathlib import Path
 
 APP = "audiobookshelf-tray"
@@ -77,6 +79,7 @@ DEFAULT_STATE = {
     "notifications": True,
     "pin_icon": True,
     "speed": 1.0,
+    "goodreads": "",
     "item_id": "",
     "title": "",
     "author": "",
@@ -136,6 +139,29 @@ def normalize_server(text):
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return ""
     return text.rstrip("/")
+
+
+def normalize_profile(text):
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "https://" + text
+    parsed = urllib.parse.urlparse(text)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or not (
+        host == "goodreads.com" or host.endswith(".goodreads.com")
+    ):
+        return ""
+    return "https://www.goodreads.com" + parsed.path.rstrip("/") if parsed.path.strip("/") else ""
+
+
+def goodreads_url(info):
+    isbn = re.sub(r"[^0-9Xx]", "", info.get("isbn") or "")
+    if len(isbn) in (10, 13):
+        return f"https://www.goodreads.com/book/isbn/{isbn}"
+    query = " ".join(p for p in (info.get("title"), info.get("author")) if p)
+    return "https://www.goodreads.com/search?q=" + urllib.parse.quote_plus(query)
 
 
 class AuthError(Exception):
@@ -266,6 +292,16 @@ class Api:
     def last_in_progress(self):
         return self.latest_progress()["id"]
 
+    def book_info(self, item_id):
+        res = self.call("GET", f"/api/items/{item_id}")
+        meta = (res.get("media") or {}).get("metadata") or {}
+        return {
+            "title": meta.get("title") or "",
+            "author": meta.get("authorName") or "",
+            "isbn": meta.get("isbn") or "",
+            "asin": meta.get("asin") or "",
+        }
+
     def play(self, item_id):
         body = {
             "deviceInfo": {
@@ -384,6 +420,7 @@ class Controller:
         ask_search=None,
         ask_setup=None,
         on_track=None,
+        on_finish=None,
     ):
         self.store = store
         self.api = api
@@ -393,6 +430,7 @@ class Controller:
         self.ask_search = ask_search or (lambda: None)
         self.ask_setup = ask_setup or (lambda: False)
         self.on_track = on_track or (lambda item_id, title, author: None)
+        self.on_finish = on_finish or (lambda item_id, title, author: None)
         self.lock = threading.RLock()
         self.status = "idle"
         self.gen = 0
@@ -818,6 +856,7 @@ class Controller:
     def _finished(self):
         item_id = self.data["item_id"]
         title = self.title
+        author = self.author
         sid = self.session.get("id") if self.session else None
         self._close_async(sid, self.duration, self.listened, self.duration, True)
         threading.Thread(target=self._mark_finished, args=(item_id,), daemon=True).start()
@@ -837,6 +876,10 @@ class Controller:
         self.store.save()
         self._changed()
         self.on_notify(f"Finished: {title}")
+        try:
+            self.on_finish(item_id, title, author)
+        except Exception:
+            log.exception("finish handler failed")
 
     def _mark_finished(self, item_id):
         try:
@@ -2023,6 +2066,7 @@ class App:
             ask_search=self.open_search,
             ask_setup=self.setup_login,
             on_track=self.show_popup,
+            on_finish=self.on_finished,
         )
         self.popup_proc = None
         theme = self.effective_theme()
@@ -2072,6 +2116,17 @@ class App:
                         )
                         for v in SPEEDS
                     ]
+                ),
+            ),
+            ps.MenuItem(
+                "Goodreads",
+                ps.Menu(
+                    ps.MenuItem(
+                        lambda item: "Unlink Profile"
+                        if self.store.data.get("goodreads")
+                        else "Link Profile",
+                        self.on_goodreads,
+                    ),
                 ),
             ),
             ps.MenuItem(
@@ -2188,6 +2243,54 @@ class App:
                 )
             except Exception:
                 log.exception("popup failed")
+
+    def on_goodreads(self, icon=None, item=None):
+        if self.store.data.get("goodreads"):
+            self.store.data["goodreads"] = ""
+            self.store.save()
+            self.notify("Goodreads unlinked")
+            return
+        threading.Thread(target=self.link_goodreads, daemon=True).start()
+
+    def link_goodreads(self):
+        if not self.dialog_lock.acquire(blocking=False):
+            return
+        try:
+            values = ask_form(
+                APP,
+                [{"label": "Goodreads profile URL:", "value": ""}],
+                "Link",
+            )
+        finally:
+            self.dialog_lock.release()
+        if not values or not values[0]:
+            return
+        url = normalize_profile(values[0])
+        if not url:
+            self.notify("That does not look like a Goodreads profile URL")
+            return
+        self.store.data["goodreads"] = url
+        self.store.save()
+        self.notify("Goodreads linked. Finished books will open on Goodreads")
+
+    def on_finished(self, item_id, title, author):
+        if not self.store.data.get("goodreads"):
+            return
+        threading.Thread(
+            target=self.open_goodreads, args=(item_id, title, author), daemon=True
+        ).start()
+
+    def open_goodreads(self, item_id, title, author):
+        info = {"title": title, "author": author}
+        try:
+            meta = self.api.book_info(item_id)
+            info.update({k: v for k, v in meta.items() if v})
+        except Exception as exc:
+            log.info("book details unavailable: %s", exc)
+        try:
+            webbrowser.open(goodreads_url(info))
+        except Exception:
+            log.exception("could not open the browser")
 
     def make_speed_action(self, value):
         def action(icon=None, item=None):

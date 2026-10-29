@@ -17,6 +17,7 @@ It talks to the Audiobookshelf REST API directly and plays the stream through mp
 - Progress syncs back to the server every few seconds and on pause, chapter jumps and quit, so other Audiobookshelf clients pick up where you left off
 - Books made of several audio files play straight through as one book
 - Speed menu with 0.70x, 1.00x (default), 1.20x, 1.50x, 1.70x and 2.00x, remembered between launches
+- Goodreads menu: Link Profile, then each finished book opens its Goodreads page in your browser so you can mark it Read and rate it
 - Recovers on its own from stalls, errors, dropped connections, expired sessions and expired logins, then resumes at the same position
 - Remembers the last book and position between launches
 - Icon style follows the system light or dark theme, or can be set by hand from the Icon style menu
