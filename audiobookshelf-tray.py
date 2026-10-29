@@ -578,19 +578,22 @@ class Hardcover:
             raise HardcoverError(str(res["error"]))
 
     def write_progress(self, user_book_id, read_id, extra, book, pos, duration):
-        fields = dict(extra)
-        fields["progress_seconds"] = int(pos)
-        try:
-            self.write_read(user_book_id, read_id, fields)
-            return
-        except HardcoverError as exc:
-            pages = int(book.get("pages") or 0)
-            if not pages or not duration:
-                raise
-            log.info("progress_seconds rejected (%s), using pages", exc)
-        fields = dict(extra)
-        fields["progress_pages"] = max(0, min(pages, int(pages * pos / duration)))
-        self.write_read(user_book_id, read_id, fields)
+        pages = int(book.get("pages") or 0)
+        seconds = {"progress_seconds": int(pos)}
+        if pages and duration:
+            page_part = {"progress_pages": max(0, min(pages, int(pages * pos / duration)))}
+            attempts = [{**seconds, **page_part}, page_part, seconds]
+        else:
+            attempts = [seconds]
+        last = None
+        for part in attempts:
+            try:
+                self.write_read(user_book_id, read_id, {**extra, **part})
+                return
+            except HardcoverError as exc:
+                last = exc
+                log.info("progress write rejected (%s), trying a simpler update", exc)
+        raise last
 
     @staticmethod
     def active_read(user_book):
@@ -2707,6 +2710,7 @@ class App:
             book = self.hc_book_for(item_id, d.get("title", ""), d.get("author", ""))
             if book:
                 self.hc.push_progress(book, pos, duration)
+                log.info("hardcover progress sent for %s at %d seconds", book["title"], int(pos))
         except HardcoverError as exc:
             self.hc_error(exc)
         finally:
