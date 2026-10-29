@@ -80,6 +80,10 @@ DEFAULT_STATE = {
     "pin_icon": True,
     "speed": 1.0,
     "goodreads": "",
+    "hardcover_token": "",
+    "hardcover_sync": True,
+    "hardcover_books": {},
+    "hardcover_last": {},
     "item_id": "",
     "title": "",
     "author": "",
@@ -92,7 +96,7 @@ class Store:
     def __init__(self, path=None):
         self.path = Path(path) if path else config_dir() / "state.json"
         self.lock = threading.Lock()
-        self.data = dict(DEFAULT_STATE)
+        self.data = json.loads(json.dumps(DEFAULT_STATE))
         self.load()
 
     def load(self):
@@ -349,6 +353,288 @@ def best_match(found, query):
     return found[0]
 
 
+HARDCOVER_URL = os.environ.get("ABS_TRAY_HARDCOVER_URL") or "https://api.hardcover.app/v1/graphql"
+HARDCOVER_PUSH_SECONDS = 300.0
+
+
+class HardcoverError(Exception):
+    pass
+
+
+def gql_object(fields):
+    parts = []
+    for key, value in fields.items():
+        if isinstance(value, str):
+            parts.append(f"{key}: {json.dumps(value)}")
+        else:
+            parts.append(f"{key}: {value}")
+    return "{" + ", ".join(parts) + "}"
+
+
+def norm_text(text):
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def parse_rating(text):
+    text = (text or "").strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return max(0.5, min(5.0, round(value * 2) / 2))
+
+
+def pick_hit(hits, info, trust_first):
+    want = norm_text(info.get("title"))
+    author = norm_text(info.get("author"))
+    for hit in hits:
+        got = norm_text(hit["title"])
+        if want and (got == want or got.startswith(want) or want.startswith(got)):
+            if not author or not hit["author"] or any(
+                part in norm_text(hit["author"]) for part in author.split()[-1:]
+            ):
+                return hit
+    for hit in hits:
+        got = norm_text(hit["title"])
+        if want and got and (want in got or got in want):
+            return hit
+    return hits[0] if hits and trust_first else None
+
+
+class Hardcover:
+    def __init__(self, store):
+        self.store = store
+
+    def token(self):
+        token = (self.store.data.get("hardcover_token") or "").strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        return token
+
+    def graphql(self, query, variables=None, timeout=25):
+        token = self.token()
+        if not token:
+            raise HardcoverError("Hardcover is not linked")
+        body = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+        req = urllib.request.Request(
+            HARDCOVER_URL,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + token,
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise HardcoverError("token rejected")
+            if exc.code == 429:
+                raise HardcoverError("rate limited, try again shortly")
+            raise HardcoverError(f"HTTP {exc.code}")
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise HardcoverError(str(getattr(exc, "reason", exc)))
+        errors = payload.get("errors")
+        if errors:
+            message = "; ".join(
+                str(e.get("message")) for e in errors if isinstance(e, dict)
+            ) or "GraphQL error"
+            raise HardcoverError(message)
+        return payload.get("data") or {}
+
+    def first_working(self, queries):
+        last = None
+        for query in queries:
+            try:
+                return self.graphql(query)
+            except HardcoverError as exc:
+                last = exc
+        raise last
+
+    def me(self):
+        data = self.graphql("query { me { id username } }")
+        me = data.get("me")
+        if isinstance(me, list):
+            me = me[0] if me else {}
+        return me or {}
+
+    def search(self, query):
+        last = None
+        for qtype in ("Book", "books"):
+            try:
+                data = self.graphql(
+                    "query ($q: String!, $t: String!) { search(query: $q, query_type: $t, "
+                    "per_page: 8, page: 1) { results } }",
+                    {"q": query, "t": qtype},
+                )
+            except HardcoverError as exc:
+                last = exc
+                continue
+            results = (data.get("search") or {}).get("results")
+            if isinstance(results, str):
+                try:
+                    results = json.loads(results)
+                except ValueError:
+                    results = {}
+            out = []
+            for hit in (results or {}).get("hits") or []:
+                doc = hit.get("document") or {}
+                try:
+                    book_id = int(doc.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                authors = doc.get("author_names") or []
+                out.append(
+                    {
+                        "id": book_id,
+                        "title": doc.get("title") or "",
+                        "author": ", ".join(authors) if isinstance(authors, list) else str(authors),
+                        "pages": int(doc.get("pages") or 0),
+                    }
+                )
+            return out
+        raise last or HardcoverError("search failed")
+
+    def find_book(self, info):
+        queries = []
+        isbn = re.sub(r"[^0-9Xx]", "", info.get("isbn") or "")
+        if len(isbn) in (10, 13):
+            queries.append((isbn, True))
+        title = (info.get("title") or "").strip()
+        full = " ".join(p for p in (title, info.get("author")) if p).strip()
+        if full:
+            queries.append((full, False))
+        if title and title != full:
+            queries.append((title, False))
+        for query, trusted in queries:
+            hits = self.search(query)
+            found = pick_hit(hits, info, trusted)
+            if found:
+                return found
+        return None
+
+    def user_book(self, book_id):
+        data = self.graphql(
+            "query { me { user_books(where: {book_id: {_eq: %d}}, limit: 1) { id status_id rating "
+            "user_book_reads(order_by: {id: desc}, limit: 1) { id progress_seconds progress_pages "
+            "started_at finished_at } } } }" % int(book_id)
+        )
+        me = data.get("me")
+        if isinstance(me, list):
+            me = me[0] if me else {}
+        books = (me or {}).get("user_books") or []
+        return books[0] if books else None
+
+    def ensure(self, book_id, status):
+        existing = self.user_book(book_id)
+        if existing is not None:
+            return existing
+        obj = gql_object({"book_id": int(book_id), "status_id": status})
+        data = self.first_working(
+            [
+                f"mutation {{ insert_user_book(object: {obj}) {{ id error }} }}",
+                f"mutation {{ insert_user_book(object: {obj}) {{ id }} }}",
+            ]
+        )
+        res = data.get("insert_user_book") or {}
+        if res.get("error"):
+            raise HardcoverError(str(res["error"]))
+        if not res.get("id"):
+            raise HardcoverError("could not add the book to your Hardcover library")
+        return {"id": res["id"], "status_id": status, "user_book_reads": []}
+
+    def update_user_book(self, user_book_id, fields):
+        obj = gql_object(fields)
+        data = self.first_working(
+            [
+                f"mutation {{ update_user_book(id: {int(user_book_id)}, object: {obj}) {{ id error }} }}",
+                f"mutation {{ update_user_book(id: {int(user_book_id)}, object: {obj}) {{ id }} }}",
+            ]
+        )
+        res = data.get("update_user_book") or {}
+        if res.get("error"):
+            raise HardcoverError(str(res["error"]))
+
+    def write_read(self, user_book_id, read_id, fields):
+        obj = gql_object(fields)
+        if read_id:
+            head = f"update_user_book_read(id: {int(read_id)}, object: {obj})"
+            key = "update_user_book_read"
+        else:
+            head = f"insert_user_book_read(user_book_id: {int(user_book_id)}, user_book_read: {obj})"
+            key = "insert_user_book_read"
+        data = self.first_working(
+            [f"mutation {{ {head} {{ id error }} }}", f"mutation {{ {head} {{ id }} }}"]
+        )
+        res = data.get(key) or {}
+        if res.get("error"):
+            raise HardcoverError(str(res["error"]))
+
+    def write_progress(self, user_book_id, read_id, extra, book, pos, duration):
+        fields = dict(extra)
+        fields["progress_seconds"] = int(pos)
+        try:
+            self.write_read(user_book_id, read_id, fields)
+            return
+        except HardcoverError as exc:
+            pages = int(book.get("pages") or 0)
+            if not pages or not duration:
+                raise
+            log.info("progress_seconds rejected (%s), using pages", exc)
+        fields = dict(extra)
+        fields["progress_pages"] = max(0, min(pages, int(pages * pos / duration)))
+        self.write_read(user_book_id, read_id, fields)
+
+    @staticmethod
+    def active_read(user_book):
+        reads = user_book.get("user_book_reads") or []
+        if reads and not reads[0].get("finished_at"):
+            return reads[0]
+        return None
+
+    def push_progress(self, book, pos, duration):
+        ub = self.ensure(book["id"], 2)
+        if ub.get("status_id") in (1, 4, 5, 6):
+            self.update_user_book(ub["id"], {"status_id": 2})
+        active = self.active_read(ub)
+        if active:
+            self.write_progress(ub["id"], active["id"], {}, book, pos, duration)
+        else:
+            today = time.strftime("%Y-%m-%d")
+            self.write_progress(ub["id"], None, {"started_at": today}, book, pos, duration)
+
+    def finish(self, book, duration):
+        ub = self.ensure(book["id"], 3)
+        if ub.get("status_id") != 3:
+            self.update_user_book(ub["id"], {"status_id": 3})
+        today = time.strftime("%Y-%m-%d")
+        active = self.active_read(ub)
+        if active:
+            self.write_progress(
+                ub["id"], active["id"], {"finished_at": today}, book, duration, duration
+            )
+        else:
+            self.write_progress(
+                ub["id"],
+                None,
+                {"started_at": today, "finished_at": today},
+                book,
+                duration,
+                duration,
+            )
+
+    def rate(self, book_id, rating):
+        ub = self.ensure(book_id, 3)
+        self.update_user_book(ub["id"], {"rating": rating})
+
+
 def subprocess_flags():
     return {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
@@ -421,6 +707,7 @@ class Controller:
         ask_setup=None,
         on_track=None,
         on_finish=None,
+        on_progress=None,
     ):
         self.store = store
         self.api = api
@@ -431,6 +718,7 @@ class Controller:
         self.ask_setup = ask_setup or (lambda: False)
         self.on_track = on_track or (lambda item_id, title, author: None)
         self.on_finish = on_finish or (lambda item_id, title, author: None)
+        self.on_progress = on_progress or (lambda item_id, pos, duration, force: None)
         self.lock = threading.RLock()
         self.status = "idle"
         self.gen = 0
@@ -912,14 +1200,21 @@ class Controller:
             listened = self.listened
             self.listened = 0.0
             duration = self.duration
+            item_id = self.data["item_id"]
             self.syncing = True
         threading.Thread(
-            target=self._sync_worker, args=(sid, pos, listened, duration), daemon=True
+            target=self._sync_worker,
+            args=(sid, pos, listened, duration, item_id, force),
+            daemon=True,
         ).start()
 
-    def _sync_worker(self, sid, pos, listened, duration):
+    def _sync_worker(self, sid, pos, listened, duration, item_id="", force=False):
         try:
             self.api.sync(sid, pos, listened, duration)
+            try:
+                self.on_progress(item_id, pos, duration, force)
+            except Exception:
+                log.exception("progress handler failed")
         except AuthError as exc:
             log.warning("sync auth failed: %s", exc)
             with self.lock:
@@ -2050,6 +2345,11 @@ class App:
             self.store.data["device_id"] = uuid.uuid4().hex
             self.store.save()
         self.api = Api(self.store)
+        self.hc = Hardcover(self.store)
+        self.hc_lock = threading.Lock()
+        self.hc_last_push = 0.0
+        self.hc_failed = set()
+        self.hc_notified = set()
         self.dialog_lock = threading.Lock()
         self.popup_lock = threading.Lock()
         self.images = {}
@@ -2067,6 +2367,7 @@ class App:
             ask_setup=self.setup_login,
             on_track=self.show_popup,
             on_finish=self.on_finished,
+            on_progress=self.hc_progress,
         )
         self.popup_proc = None
         theme = self.effective_theme()
@@ -2126,6 +2427,35 @@ class App:
                         if self.store.data.get("goodreads")
                         else "Link Profile",
                         self.on_goodreads,
+                    ),
+                ),
+            ),
+            ps.MenuItem(
+                "Hardcover",
+                ps.Menu(
+                    ps.MenuItem(
+                        lambda item: "Unlink Account" if self.hc_ready() else "Link Account",
+                        self.on_hc_link,
+                    ),
+                    ps.MenuItem(
+                        "Sync Progress",
+                        self.on_hc_sync,
+                        checked=lambda item: bool(self.store.data.get("hardcover_sync", True)),
+                        enabled=lambda item: self.hc_ready(),
+                    ),
+                    ps.MenuItem(
+                        "Rate Last Book",
+                        self.on_hc_rate,
+                        enabled=lambda item: bool(
+                            self.hc_ready() and self.store.data.get("hardcover_last")
+                        ),
+                    ),
+                    ps.MenuItem(
+                        "Wrong Book?",
+                        self.on_hc_wrong,
+                        enabled=lambda item: bool(
+                            self.hc_ready() and self.store.data.get("item_id")
+                        ),
                     ),
                 ),
             ),
@@ -2274,11 +2604,201 @@ class App:
         self.notify("Goodreads linked. Finished books will open on Goodreads")
 
     def on_finished(self, item_id, title, author):
-        if not self.store.data.get("goodreads"):
+        if self.store.data.get("goodreads"):
+            threading.Thread(
+                target=self.open_goodreads, args=(item_id, title, author), daemon=True
+            ).start()
+        if self.hc_ready():
+            threading.Thread(
+                target=self.hc_finish, args=(item_id, title, author), daemon=True
+            ).start()
+
+    def hc_ready(self):
+        return bool(self.hc.token())
+
+    def hc_error(self, exc):
+        log.warning("hardcover: %s", exc)
+        text = str(exc)
+        if text not in self.hc_notified:
+            self.hc_notified.add(text)
+            self.notify(f"Hardcover: {text}")
+
+    def on_hc_link(self, icon=None, item=None):
+        if self.hc_ready():
+            self.store.data["hardcover_token"] = ""
+            self.store.save()
+            self.notify("Hardcover unlinked")
+            return
+        threading.Thread(target=self.link_hardcover, daemon=True).start()
+
+    def link_hardcover(self):
+        if not self.dialog_lock.acquire(blocking=False):
+            return
+        try:
+            values = ask_form(
+                APP,
+                [{"label": "Hardcover API token:", "value": "", "secret": True}],
+                "Link",
+            )
+        finally:
+            self.dialog_lock.release()
+        if not values or not values[0].strip():
+            return
+        self.store.data["hardcover_token"] = values[0].strip()
+        self.store.save()
+        try:
+            me = self.hc.me()
+        except HardcoverError as exc:
+            self.store.data["hardcover_token"] = ""
+            self.store.save()
+            self.notify(f"Hardcover link failed: {exc}")
+            return
+        self.hc_notified.clear()
+        self.notify(f"Hardcover linked as {me.get('username') or 'your account'}")
+
+    def on_hc_sync(self, icon=None, item=None):
+        self.store.data["hardcover_sync"] = not self.store.data.get("hardcover_sync", True)
+        self.store.save()
+
+    def hc_book_for(self, item_id, title, author):
+        books = self.store.data.setdefault("hardcover_books", {})
+        cached = books.get(item_id)
+        if cached:
+            return cached
+        if item_id in self.hc_failed:
+            return None
+        info = {"title": title, "author": author}
+        try:
+            info.update({k: v for k, v in self.api.book_info(item_id).items() if v})
+        except Exception as exc:
+            log.info("book details unavailable: %s", exc)
+        try:
+            found = self.hc.find_book(info)
+        except HardcoverError as exc:
+            self.hc_error(exc)
+            return None
+        if not found:
+            self.hc_failed.add(item_id)
+            self.notify(f"Hardcover: no match for {info['title']}. Use Wrong Book to pick it")
+            return None
+        books[item_id] = found
+        self.store.save()
+        self.notify(f"Hardcover: matched {found['title']} by {found['author']}")
+        return found
+
+    def hc_progress(self, item_id, pos, duration, force):
+        if not self.hc_ready() or not self.store.data.get("hardcover_sync", True):
+            return
+        if not item_id or pos <= 0:
+            return
+        now = time.time()
+        if not force and now - self.hc_last_push < HARDCOVER_PUSH_SECONDS:
+            return
+        if not self.hc_lock.acquire(blocking=False):
+            return
+        self.hc_last_push = now
+        threading.Thread(
+            target=self.hc_push, args=(item_id, pos, duration), daemon=True
+        ).start()
+
+    def hc_push(self, item_id, pos, duration):
+        try:
+            d = self.store.data
+            book = self.hc_book_for(item_id, d.get("title", ""), d.get("author", ""))
+            if book:
+                self.hc.push_progress(book, pos, duration)
+        except HardcoverError as exc:
+            self.hc_error(exc)
+        finally:
+            self.hc_lock.release()
+
+    def hc_finish(self, item_id, title, author):
+        try:
+            book = self.hc_book_for(item_id, title, author)
+            if not book:
+                return
+            self.hc.finish(book, self.ctl.duration)
+        except HardcoverError as exc:
+            self.hc_error(exc)
+            return
+        self.store.data["hardcover_last"] = {"book": book, "title": title}
+        self.store.save()
+        self.notify(f"Marked Read on Hardcover: {title}")
+        self.hc_prompt_rating(book, title)
+
+    def hc_prompt_rating(self, book, title):
+        if not self.dialog_lock.acquire(timeout=10):
+            return
+        try:
+            values = ask_form(
+                APP,
+                [{"label": f"Rate {title} from 0.5 to 5 stars (blank to skip):", "value": ""}],
+                "Rate",
+            )
+        finally:
+            self.dialog_lock.release()
+        if not values or not values[0].strip():
+            return
+        rating = parse_rating(values[0])
+        if rating is None:
+            self.notify("That is not a valid rating")
+            return
+        try:
+            self.hc.rate(book["id"], rating)
+        except HardcoverError as exc:
+            self.hc_error(exc)
+            return
+        self.notify(f"Rated {title} {rating:g} stars on Hardcover")
+
+    def on_hc_rate(self, icon=None, item=None):
+        last = self.store.data.get("hardcover_last") or {}
+        if not last.get("book"):
+            self.notify("No finished book to rate yet")
             return
         threading.Thread(
-            target=self.open_goodreads, args=(item_id, title, author), daemon=True
+            target=self.hc_prompt_rating, args=(last["book"], last.get("title", "")), daemon=True
         ).start()
+
+    def on_hc_wrong(self, icon=None, item=None):
+        threading.Thread(target=self.hc_wrong, daemon=True).start()
+
+    def hc_wrong(self):
+        d = self.store.data
+        item_id = d.get("item_id")
+        if not item_id:
+            self.notify("Start a book first")
+            return
+        if not self.dialog_lock.acquire(blocking=False):
+            return
+        try:
+            values = ask_form(
+                APP,
+                [
+                    {
+                        "label": "Hardcover search for this book:",
+                        "value": f"{d.get('title', '')} {d.get('author', '')}".strip(),
+                    }
+                ],
+                "Match",
+            )
+        finally:
+            self.dialog_lock.release()
+        if not values or not values[0]:
+            return
+        try:
+            hits = self.hc.search(values[0])
+        except HardcoverError as exc:
+            self.hc_error(exc)
+            return
+        if not hits:
+            self.notify("No Hardcover results for that search")
+            return
+        chosen = pick_hit(hits, {"title": values[0]}, True)
+        d.setdefault("hardcover_books", {})[item_id] = chosen
+        self.hc_failed.discard(item_id)
+        self.store.save()
+        self.notify(f"Hardcover: matched {chosen['title']} by {chosen['author']}")
+        self.hc_progress(item_id, max(self.ctl.last_pos, 1.0), self.ctl.duration, True)
 
     def open_goodreads(self, item_id, title, author):
         info = {"title": title, "author": author}
@@ -2652,6 +3172,39 @@ def stop_running(wait=15.0):
             probe.close()
             time.sleep(0.2)
     return True
+
+
+def selftest_hardcover():
+    print(f"{APP} {VERSION} hardcover selftest")
+    store = Store()
+    hc = Hardcover(store)
+    if not hc.token():
+        print("FAIL: link Hardcover from the menu first")
+        return 1
+    try:
+        me = hc.me()
+        print("linked as", me.get("username"))
+        title = store.data.get("title") or "Dune"
+        author = store.data.get("author") or ""
+        book = hc.find_book({"title": title, "author": author})
+        if not book:
+            print("FAIL: no Hardcover match for", title)
+            return 1
+        print("matched:", book["title"], "by", book["author"], f"(id {book['id']})")
+        ub = hc.user_book(book["id"])
+        print("in your library:", {k: ub.get(k) for k in ("status_id", "rating")} if ub else "not yet")
+    except HardcoverError as exc:
+        print("FAIL:", exc)
+        return 1
+    for name in ("DatesReadInput", "UserBookUpdateInput"):
+        try:
+            data = hc.graphql('query { __type(name: "%s") { inputFields { name } } }' % name)
+            names = [f["name"] for f in ((data.get("__type") or {}).get("inputFields") or [])]
+            print(name + ":", ", ".join(names) or "not listed")
+        except HardcoverError as exc:
+            print(name, "introspection unavailable:", exc)
+    print("PASS")
+    return 0
 
 
 def selftest(seconds=8):
@@ -3136,6 +3689,7 @@ def main():
     parser.add_argument("--cover", default="")
     parser.add_argument("--seconds", type=float, default=4.0)
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--selftest-hardcover", action="store_true")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--setup", action="store_true")
     parser.add_argument("--stop", action="store_true")
@@ -3169,6 +3723,8 @@ def main():
         return service_remove()
     if args.selftest:
         return selftest()
+    if args.selftest_hardcover:
+        return selftest_hardcover()
     setup_logging()
     lock = single_instance()
     if lock is None:

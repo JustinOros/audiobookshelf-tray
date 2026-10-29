@@ -18,6 +18,7 @@ It talks to the Audiobookshelf REST API directly and plays the stream through mp
 - Books made of several audio files play straight through as one book
 - Speed menu with 0.70x, 1.00x (default), 1.20x, 1.50x, 1.70x and 2.00x, remembered between launches
 - Goodreads menu: Link Profile, then each finished book opens its Goodreads page in your browser so you can mark it Read and rate it
+- Hardcover menu: Link Account, then progress syncs to your Hardcover profile, finished books are marked Read and you are asked for a star rating
 - Recovers on its own from stalls, errors, dropped connections, expired sessions and expired logins, then resumes at the same position
 - Remembers the last book and position between launches
 - Icon style follows the system light or dark theme, or can be set by hand from the Icon style menu
@@ -39,6 +40,22 @@ Then left-click the tray icon:
 After that, clicking Play simply resumes the last book. Use Sign out in the menu to forget the server and login, and Sign in (or Play) to enter them again.
 
 Your password is stored in `state.json` in the folder listed under Files, readable only by your account where the OS supports it. The app uses it to sign in again whenever the server expires your login.
+
+## Hardcover
+
+Open the Hardcover menu and choose Link Account, then paste your API token. You can copy it from your Hardcover account settings under the API section. Unlink Account removes it.
+
+Once linked:
+
+- While you listen, the book is set to Currently Reading and its progress is sent about every five minutes, and right away when you pause or jump chapters. Turn this off with Sync Progress.
+- When you finish a book it is marked Read with today's date, then a box asks for your rating from 0.5 to 5 stars. Leave it blank to skip, or use Rate Last Book later.
+- Books are matched by ISBN when Audiobookshelf has one, otherwise by title and author, and a notification shows what was matched. If it picked the wrong book, choose Wrong Book?, edit the search text and the new match is remembered.
+
+Your token is stored in `state.json` like your password. Run `python audiobookshelf-tray.py --selftest-hardcover` to check the connection and the match for your current book. It only reads, it does not change your Hardcover account.
+
+## Goodreads
+
+Choose Goodreads, then Link Profile, and paste your profile URL. After that, each finished book opens its Goodreads page in your browser so you can mark it Read and rate it. Goodreads has no public API, so nothing is sent automatically.
 
 ## Manual install
 
