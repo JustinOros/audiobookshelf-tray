@@ -2840,7 +2840,11 @@ class App:
 
     def tooltip(self):
         title = self.title_with_percent()
-        return f"{APP}: {title}"[:120] if title else APP
+        if not title:
+            return APP
+        if self.ctl.status == "paused":
+            title += " - paused"
+        return title[:120]
 
     def animate(self):
         ticks = 0
@@ -2854,7 +2858,7 @@ class App:
                         self.set_icon(self.current_kind(), self.frame)
                     except Exception:
                         log.exception("theme switch failed")
-            if ticks % 50 == 0 and self.ctl.status in ("playing", "paused"):
+            if ticks % 17 == 0 and self.ctl.status in ("playing", "paused"):
                 try:
                     self.icon.title = self.tooltip()
                     self.icon.update_menu()
