@@ -2859,11 +2859,7 @@ class App:
                     except Exception:
                         log.exception("theme switch failed")
             if ticks % 17 == 0 and self.ctl.status in ("playing", "paused"):
-                try:
-                    self.icon.title = self.tooltip()
-                    self.icon.update_menu()
-                except Exception:
-                    log.exception("menu refresh failed")
+                self.push_title()
             if self.ctl.status != "loading":
                 self.frame = 0
                 continue
@@ -2878,12 +2874,39 @@ class App:
         if d.get("item_id"):
             self.show_popup(d["item_id"], self.ctl.now_title(), d.get("author", ""), force=True)
 
+    def on_main(self, fn):
+        if sys.platform != "darwin":
+            fn()
+            return
+        try:
+            from PyObjCTools import AppHelper
+
+            AppHelper.callAfter(fn)
+        except Exception:
+            log.exception("main thread dispatch failed")
+
+    def push_title(self):
+        text = self.tooltip()
+
+        def apply():
+            try:
+                self.icon.title = text
+                self.icon.update_menu()
+            except Exception:
+                log.exception("title update failed")
+
+        self.on_main(apply)
+
     def notify(self, message):
         log.info("notify: %s", message)
-        try:
-            self.icon.notify(message, APP)
-        except Exception:
-            pass
+
+        def send():
+            try:
+                self.icon.notify(message, APP)
+            except Exception:
+                pass
+
+        self.on_main(send)
 
     def open_search(self):
         if not self.dialog_lock.acquire(blocking=False):
@@ -3012,8 +3035,7 @@ class App:
         kind = status if status in ICON_COLORS else "idle"
         try:
             self.set_icon(kind, self.frame)
-            self.icon.title = self.tooltip()
-            self.icon.update_menu()
+            self.push_title()
         except Exception:
             log.exception("icon refresh failed")
 
@@ -3036,7 +3058,8 @@ class App:
         key = (theme, kind, frame if kind == "loading" else 0)
         if key not in self.images:
             self.images[key] = make_icon_image(kind, theme, key[2])
-        self.icon.icon = self.images[key]
+        image = self.images[key]
+        self.on_main(lambda: setattr(self.icon, "icon", image))
 
     def install_mac_click(self):
         import AppKit
@@ -3110,7 +3133,7 @@ class App:
                     self.install_mac_click()
                 except Exception:
                     log.exception("mac click handling failed, using default menu click")
-            hide_dock_icon()
+            self.on_main(hide_dock_icon)
             icon.visible = True
             self.refresh()
             if sys.platform == "win32":
