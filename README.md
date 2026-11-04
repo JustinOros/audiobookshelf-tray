@@ -20,6 +20,7 @@ It talks to the Audiobookshelf REST API directly and plays the stream through mp
 - Speed menu with 0.70x, 1.00x (default), 1.20x, 1.50x, 1.70x and 2.00x, remembered between launches
 - Goodreads menu: Link Profile, then each finished book opens its Goodreads page in your browser so you can mark it Read and rate it
 - Hardcover menu: Link Account, then progress syncs to your Hardcover profile, finished books are marked Read and you are asked for a star rating
+- Discord menu: shows your book as a Listening status with an elapsed bar, like Spotify
 - Recovers on its own from stalls, errors, dropped connections, expired sessions and expired logins, then resumes at the same position
 - Remembers the last book and position between launches
 - Icon style follows the system light or dark theme, or can be set by hand from the Icon style menu
@@ -53,6 +54,17 @@ Once linked:
 - Books are matched by ISBN when Audiobookshelf has one, otherwise by title and author, and a notification shows what was matched. If it picked the wrong book, choose Wrong Book?, edit the search text and the new match is remembered.
 
 Your token is stored in `state.json` like your password. Run `python audiobookshelf-tray.py --selftest-hardcover` to check the connection and the match for your current book. It only reads, it does not change your Hardcover account.
+
+## Discord
+
+Shows what you are listening to in your Discord profile, with the title, author and a progress bar that follows the speed you set. It clears when you pause.
+
+1. Go to https://discord.com/developers/applications and choose New Application. The name you give it is what Discord shows, for example Audiobookshelf.
+2. Copy the Application ID from General Information.
+3. Optional: under Rich Presence, then Art Assets, upload a square image named `book` to show as the icon.
+4. In the tray menu choose Discord, then Link Application, and paste the ID. Show Status turns the status on and off.
+
+The Discord desktop app must be running on the same computer. The status is visible to anyone who can see your Discord activity.
 
 ## Goodreads
 

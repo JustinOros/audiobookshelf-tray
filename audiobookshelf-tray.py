@@ -81,6 +81,8 @@ DEFAULT_STATE = {
     "speed": 1.0,
     "goodreads": "",
     "hardcover_token": "",
+    "discord_id": "",
+    "discord_show": True,
     "hardcover_sync": True,
     "hardcover_books": {},
     "hardcover_last": {},
@@ -2640,6 +2642,150 @@ class MediaKeys:
         GLib.idle_add(emit)
 
 
+DISCORD_MIN_SECONDS = 15.0
+DISCORD_RETRY_SECONDS = 30.0
+
+
+def discord_id_ok(text):
+    return bool(re.fullmatch(r"\d{15,22}", (text or "").strip()))
+
+
+def presence_differs(old, new):
+    if set(old) != set(new):
+        return True
+    for key, value in new.items():
+        if key in ("start", "end"):
+            if abs(int(value) - int(old[key])) > 5:
+                return True
+        elif old[key] != value:
+            return True
+    return False
+
+
+class DiscordPresence:
+    def __init__(self, get_id):
+        self.get_id = get_id
+        self.lock = threading.Lock()
+        self.event = threading.Event()
+        self.want = None
+        self.closing = False
+        self.thread = None
+        self.client = None
+        self.client_id = ""
+        self.sent = None
+        self.sent_at = 0.0
+        self.retry_at = 0.0
+        self.warned = False
+
+    def submit(self, payload):
+        with self.lock:
+            if self.closing:
+                return
+            self.want = payload
+            if self.thread is None and payload is not None:
+                self.thread = threading.Thread(target=self.run, daemon=True)
+                self.thread.start()
+        self.event.set()
+
+    def shutdown(self):
+        with self.lock:
+            self.closing = True
+            self.want = None
+            thread = self.thread
+        self.event.set()
+        if thread is not None:
+            thread.join(3)
+
+    def run(self):
+        while True:
+            self.event.wait(5.0)
+            self.event.clear()
+            with self.lock:
+                want = self.want
+                closing = self.closing
+            try:
+                self.step(want)
+            except Exception:
+                log.info("discord presence error", exc_info=True)
+                self.drop()
+                self.retry_at = time.time() + DISCORD_RETRY_SECONDS
+            if closing:
+                self.drop()
+                return
+
+    def drop(self):
+        client = self.client
+        self.client = None
+        self.client_id = ""
+        self.sent = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def connect(self, cid):
+        try:
+            from pypresence import Presence
+        except ImportError:
+            if not self.warned:
+                self.warned = True
+                log.warning("pypresence is not installed, discord status is unavailable")
+            self.retry_at = time.time() + 300.0
+            return
+        client = None
+        try:
+            client = Presence(cid)
+            client.connect()
+        except Exception as exc:
+            log.info("discord not reachable: %s", exc)
+            self.retry_at = time.time() + DISCORD_RETRY_SECONDS
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            return
+        self.client = client
+        self.client_id = cid
+        self.sent = None
+        log.info("discord presence connected")
+
+    def step(self, want):
+        cid = (self.get_id() or "").strip()
+        if self.client is not None and cid != self.client_id:
+            self.drop()
+        if want is None or not cid:
+            if self.client is not None and self.sent is not None:
+                self.client.clear()
+                self.sent = None
+            return
+        now = time.time()
+        if self.client is None:
+            if now < self.retry_at:
+                return
+            self.connect(cid)
+            if self.client is None:
+                return
+        if self.sent is not None:
+            if not presence_differs(self.sent, want):
+                return
+            if now - self.sent_at < DISCORD_MIN_SECONDS:
+                return
+        try:
+            from pypresence import ActivityType
+
+            extra = {"activity_type": ActivityType.LISTENING}
+        except ImportError:
+            extra = {}
+        try:
+            self.client.update(**extra, **want)
+        except TypeError:
+            self.client.update(**want)
+        self.sent = dict(want)
+        self.sent_at = now
+
+
 class App:
     def __init__(self):
         import pystray
@@ -2676,6 +2822,7 @@ class App:
         )
         self.popup_proc = None
         self.media = MediaKeys(self.on_toggle, lambda: (self.ctl.status, self.ctl.now_title()))
+        self.discord = DiscordPresence(lambda: self.store.data.get("discord_id", ""))
         theme = self.effective_theme()
         self.images[(theme, "idle", 0)] = make_icon_image("idle", theme)
         if sys.platform == "win32":
@@ -2733,6 +2880,23 @@ class App:
                         if self.store.data.get("goodreads")
                         else "Link Profile",
                         self.on_goodreads,
+                    ),
+                ),
+            ),
+            ps.MenuItem(
+                "Discord",
+                ps.Menu(
+                    ps.MenuItem(
+                        lambda item: "Unlink Application"
+                        if self.store.data.get("discord_id")
+                        else "Link Application",
+                        self.on_discord_link,
+                    ),
+                    ps.MenuItem(
+                        "Show Status",
+                        self.on_discord_show,
+                        checked=lambda item: bool(self.store.data.get("discord_show", True)),
+                        enabled=lambda item: bool(self.store.data.get("discord_id")),
                     ),
                 ),
             ),
@@ -2928,6 +3092,74 @@ class App:
         if text not in self.hc_notified:
             self.hc_notified.add(text)
             self.notify(f"Hardcover: {text}")
+
+    def discord_payload(self):
+        d = self.store.data
+        if not d.get("discord_id") or not d.get("discord_show", True):
+            return None
+        if self.ctl.status != "playing":
+            return None
+        title = self.ctl.now_title()
+        if not title:
+            return None
+        payload = {
+            "details": title[:128],
+            "large_image": "book",
+            "large_text": title[:128],
+        }
+        author = (d.get("author") or "").strip()
+        if len(author) > 1:
+            payload["state"] = ("by " + author)[:128]
+        duration = float(self.ctl.duration or 0)
+        if duration > 0:
+            speed = self.ctl.speed or 1.0
+            pos = max(0.0, min(duration, float(self.ctl.last_pos or 0)))
+            now = time.time()
+            payload["start"] = int(now - pos / speed)
+            payload["end"] = int(now + (duration - pos) / speed)
+        return payload
+
+    def discord_tick(self):
+        try:
+            self.discord.submit(self.discord_payload())
+        except Exception:
+            log.exception("discord update failed")
+
+    def on_discord_show(self, icon=None, item=None):
+        self.store.data["discord_show"] = not self.store.data.get("discord_show", True)
+        self.store.save()
+        self.discord_tick()
+
+    def on_discord_link(self, icon=None, item=None):
+        if self.store.data.get("discord_id"):
+            self.store.data["discord_id"] = ""
+            self.store.save()
+            self.discord_tick()
+            self.notify("Discord unlinked")
+            return
+        threading.Thread(target=self.link_discord, daemon=True).start()
+
+    def link_discord(self):
+        if not self.dialog_lock.acquire(blocking=False):
+            return
+        try:
+            values = ask_form(
+                APP,
+                [{"label": "Discord Application ID:", "value": ""}],
+                "Link",
+            )
+        finally:
+            self.dialog_lock.release()
+        if not values or not values[0].strip():
+            return
+        if not discord_id_ok(values[0]):
+            self.notify("That does not look like a Discord Application ID")
+            return
+        self.store.data["discord_id"] = values[0].strip()
+        self.store.data["discord_show"] = True
+        self.store.save()
+        self.discord_tick()
+        self.notify("Discord linked. Keep the Discord desktop app open to show your book")
 
     def on_hc_link(self, icon=None, item=None):
         if self.hc_ready():
@@ -3163,6 +3395,7 @@ class App:
                         log.exception("theme switch failed")
             if ticks % 17 == 0 and self.ctl.status in ("playing", "paused"):
                 self.push_title()
+                self.discord_tick()
             if self.ctl.status != "loading":
                 self.frame = 0
                 continue
@@ -3252,6 +3485,7 @@ class App:
             threading.Thread(target=self.ctl.ensure_ready, daemon=True).start()
 
     def on_quit(self, icon=None, item=None):
+        self.discord.shutdown()
         self.ctl.shutdown()
         self.icon.stop()
 
@@ -3340,6 +3574,7 @@ class App:
             self.set_icon(kind, self.frame)
             self.push_title()
             self.media.update()
+            self.discord_tick()
         except Exception:
             log.exception("icon refresh failed")
 
@@ -3613,6 +3848,7 @@ PIP_DEPS = {
     "pystray": "pystray>=0.19.5",
     "PIL": "Pillow>=10.0",
     "truststore": "truststore>=0.9",
+    "pypresence": "pypresence>=4.3.0",
 }
 if sys.platform == "darwin":
     PIP_DEPS["MediaPlayer"] = "pyobjc-framework-MediaPlayer"
