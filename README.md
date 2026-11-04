@@ -16,6 +16,7 @@ It talks to the Audiobookshelf REST API directly and plays the stream through mp
 - Now Playing shows a popup with the cover art, title and author
 - Progress syncs back to the server every few seconds and on pause, chapter jumps and quit, so other Audiobookshelf clients pick up where you left off
 - Books made of several audio files play straight through as one book
+- Keyboard play/pause media key (F8 on a Mac keyboard) toggles playback, and the book shows in the system Now Playing controls
 - Speed menu with 0.70x, 1.00x (default), 1.20x, 1.50x, 1.70x and 2.00x, remembered between launches
 - Goodreads menu: Link Profile, then each finished book opens its Goodreads page in your browser so you can mark it Read and rate it
 - Hardcover menu: Link Account, then progress syncs to your Hardcover profile, finished books are marked Read and you are asked for a star rating
