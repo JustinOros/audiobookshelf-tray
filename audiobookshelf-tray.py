@@ -19,6 +19,7 @@ from pathlib import Path
 
 APP = "audiobookshelf-tray"
 VERSION = "1.0.0"
+SKIP_SECONDS = 30
 SAVE_INTERVAL = 5.0
 SYNC_INTERVAL = 15.0
 STALL_SECONDS = 15.0
@@ -1271,45 +1272,18 @@ class Controller:
         self.status = "playing"
         self._changed()
 
-    def next(self):
+    def skip(self, seconds):
         with self.lock:
             if self.session is None or self.status == "loading" or self.session_expired:
                 return
-            if not self.chapters:
-                self.on_notify("This book has no chapters")
-                return
-            i = self.chapter_index()
-            if i == -1:
-                later = [c for c in self.chapters if c["start"] > self.last_pos]
-                if not later:
-                    return
-                target = later[0]["start"]
-            elif i + 1 < len(self.chapters):
-                target = self.chapters[i + 1]["start"]
-            else:
-                return
-            self.seek_global(target)
+            self.seek_global(self.last_pos + seconds)
         self._sync_async(force=True)
 
-    def previous(self):
-        with self.lock:
-            if self.session is None or self.status == "loading" or self.session_expired:
-                return
-            if not self.chapters:
-                self.on_notify("This book has no chapters")
-                return
-            i = self.chapter_index()
-            if i == -1:
-                earlier = [c for c in self.chapters if c["start"] < self.last_pos]
-                if not earlier:
-                    return
-                target = earlier[-1]["start"]
-            elif i == 0:
-                target = self.chapters[0]["start"]
-            else:
-                target = self.chapters[i - 1]["start"]
-            self.seek_global(target)
-        self._sync_async(force=True)
+    def forward(self):
+        self.skip(SKIP_SECONDS)
+
+    def back(self):
+        self.skip(-SKIP_SECONDS)
 
     def current_chapter_title(self):
         with self.lock:
@@ -2850,8 +2824,8 @@ class App:
                 default=True,
             ),
             ps.MenuItem("Search...", self.on_search),
-            ps.MenuItem("Next", self.on_next),
-            ps.MenuItem("Previous", self.on_previous),
+            ps.MenuItem(f"Forward {SKIP_SECONDS}s", self.on_forward),
+            ps.MenuItem(f"Back {SKIP_SECONDS}s", self.on_back),
             ps.Menu.SEPARATOR,
             ps.MenuItem(
                 lambda item: self.now_playing_text(),
@@ -3468,11 +3442,11 @@ class App:
     def on_search(self, icon=None, item=None):
         threading.Thread(target=self.search_flow, daemon=True).start()
 
-    def on_next(self, icon=None, item=None):
-        self.ctl.next()
+    def on_forward(self, icon=None, item=None):
+        self.ctl.forward()
 
-    def on_previous(self, icon=None, item=None):
-        self.ctl.previous()
+    def on_back(self, icon=None, item=None):
+        self.ctl.back()
 
     def signed_in(self):
         d = self.store.data

@@ -11,10 +11,10 @@ It talks to the Audiobookshelf REST API directly and plays the stream through mp
 - If you typed an address without http:// or https://, https:// is assumed
 - Play resumes your most recent in-progress book on the server from its saved position, even if you last listened on another device
 - With nothing in progress, Play opens a search box so you can find a book by title
-- Right-click menu: Play/Pause, Search, Next, Previous, Now Playing, Quit
-- Next and Previous jump to the next and previous chapter
+- Right-click menu: Play/Pause, Search, Forward 30s, Back 30s, Now Playing, Quit
+- Forward 30s and Back 30s skip ahead or back 30 seconds, like Audible
 - Now Playing shows a popup with the cover art, title and author
-- Progress syncs back to the server every few seconds and on pause, chapter jumps and quit, so other Audiobookshelf clients pick up where you left off
+- Progress syncs back to the server every few seconds and on pause, skips and quit, so other Audiobookshelf clients pick up where you left off
 - Books made of several audio files play straight through as one book
 - Keyboard play/pause media key (F8 on a Mac keyboard) toggles playback, and the book shows in the system Now Playing controls
 - Speed menu with 0.70x, 1.00x (default), 1.20x, 1.50x, 1.70x and 2.00x, remembered between launches
@@ -49,7 +49,7 @@ Open the Hardcover menu and choose Link Account, then paste your API token. You 
 
 Once linked:
 
-- While you listen, the book is set to Currently Reading and its progress is sent about every five minutes, and right away when you pause or jump chapters. Turn this off with Sync Progress.
+- While you listen, the book is set to Currently Reading and its progress is sent about every five minutes, and right away when you pause or skip. Turn this off with Sync Progress.
 - When you finish a book it is marked Read with today's date, then a box asks for your rating from 0.5 to 5 stars. Leave it blank to skip, or use Rate Last Book later.
 - Books are matched by ISBN when Audiobookshelf has one, otherwise by title and author, and a notification shows what was matched. If it picked the wrong book, choose Wrong Book?, edit the search text and the new match is remembered.
 
