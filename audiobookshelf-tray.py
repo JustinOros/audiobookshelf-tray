@@ -3086,8 +3086,6 @@ class App:
             return None
         author = (d.get("author") or "").strip()
         label = "Audiobook: " + title
-        if len(author) > 1:
-            label += " (" + author + ")"
         payload = {
             "name": label[:128],
             "details": title[:128],
