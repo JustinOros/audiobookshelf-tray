@@ -3085,7 +3085,7 @@ class App:
         if not title:
             return None
         author = (d.get("author") or "").strip()
-        label = "Audiobook: " + title
+        label = title + " (Audiobook)"
         payload = {
             "name": label[:128],
             "details": title[:128],
