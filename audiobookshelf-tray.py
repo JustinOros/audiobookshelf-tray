@@ -2746,16 +2746,24 @@ class DiscordPresence:
                 return
             if now - self.sent_at < DISCORD_MIN_SECONDS:
                 return
+        extra = {}
         try:
             from pypresence import ActivityType
 
-            extra = {"activity_type": ActivityType.LISTENING}
+            extra["activity_type"] = ActivityType.LISTENING
         except ImportError:
-            extra = {}
+            pass
+        try:
+            from pypresence import StatusDisplayType
+
+            extra["status_display_type"] = StatusDisplayType.NAME
+        except ImportError:
+            pass
         try:
             self.client.update(**extra, **want)
         except TypeError:
-            self.client.update(**want)
+            extra.pop("status_display_type", None)
+            self.client.update(**extra, **{k: v for k, v in want.items() if k != "name"})
         self.sent = dict(want)
         self.sent_at = now
 
@@ -3076,12 +3084,16 @@ class App:
         title = self.ctl.now_title()
         if not title:
             return None
+        author = (d.get("author") or "").strip()
+        label = "Audiobook: " + title
+        if len(author) > 1:
+            label += " (" + author + ")"
         payload = {
+            "name": label[:128],
             "details": title[:128],
             "large_image": "book",
             "large_text": title[:128],
         }
-        author = (d.get("author") or "").strip()
         if len(author) > 1:
             payload["state"] = ("by " + author)[:128]
         duration = float(self.ctl.duration or 0)
@@ -3822,7 +3834,7 @@ PIP_DEPS = {
     "pystray": "pystray>=0.19.5",
     "PIL": "Pillow>=10.0",
     "truststore": "truststore>=0.9",
-    "pypresence": "pypresence>=4.3.0",
+    "pypresence": "pypresence>=4.6.0",
 }
 if sys.platform == "darwin":
     PIP_DEPS["MediaPlayer"] = "pyobjc-framework-MediaPlayer"
