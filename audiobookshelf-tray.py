@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import json
 import locale
 import logging
@@ -85,6 +86,7 @@ DEFAULT_STATE = {
     "discord_id": "",
     "discord_show": True,
     "hardcover_sync": True,
+    "series_next": True,
     "hardcover_books": {},
     "hardcover_last": {},
     "item_id": "",
@@ -309,6 +311,42 @@ class Api:
             "asin": meta.get("asin") or "",
         }
 
+    def next_in_series(self, item_id):
+        res = self.call("GET", f"/api/items/{item_id}")
+        lib_id = res.get("libraryId") or ""
+        meta = (res.get("media") or {}).get("metadata") or {}
+        series = meta.get("series") or []
+        if isinstance(series, dict):
+            series = [series]
+        if not lib_id:
+            return ""
+        finished = set()
+        try:
+            for prog in self.call("GET", "/api/me").get("mediaProgress") or []:
+                if prog.get("isFinished") and prog.get("libraryItemId"):
+                    finished.add(prog["libraryItemId"])
+        except (AuthError, ApiError):
+            pass
+        for entry in series:
+            sid = entry.get("id")
+            current = parse_sequence(entry.get("sequence"))
+            if not sid or current is None:
+                continue
+            key = urllib.parse.quote(base64.b64encode(sid.encode()).decode(), safe="")
+            found = self.call("GET", f"/api/libraries/{lib_id}/items?filter=series.{key}&limit=200")
+            best = None
+            for item in found.get("results") or []:
+                if item.get("id") == item_id or item.get("id") in finished:
+                    continue
+                seq = item_sequence(item, sid)
+                if seq is None or seq <= current:
+                    continue
+                if best is None or seq < best[0]:
+                    best = (seq, item.get("id"))
+            if best:
+                return best[1]
+        return ""
+
     def play(self, item_id):
         body = {
             "deviceInfo": {
@@ -341,6 +379,26 @@ class Api:
         return self.call(
             "GET", f"/api/items/{item_id}/cover?width=400&format=jpeg", binary=True, timeout=15
         )
+
+
+def parse_sequence(value):
+    match = re.search(r"\d+(?:\.\d+)?", str(value if value is not None else ""))
+    return float(match.group(0)) if match else None
+
+
+def item_sequence(item, series_id):
+    meta = (item.get("media") or {}).get("metadata") or {}
+    series = meta.get("series")
+    if isinstance(series, dict):
+        series = [series]
+    for entry in series or []:
+        if entry.get("id") == series_id:
+            return parse_sequence(entry.get("sequence"))
+    if isinstance(series, list) and len(series) == 1 and not series[0].get("id"):
+        return parse_sequence(series[0].get("sequence"))
+    name = meta.get("seriesName") or ""
+    match = re.search(r"#(\d+(?:\.\d+)?)", name)
+    return float(match.group(1)) if match else None
 
 
 def best_match(found, query):
@@ -1174,6 +1232,21 @@ class Controller:
             self.on_finish(item_id, title, author)
         except Exception:
             log.exception("finish handler failed")
+        if self.data.get("series_next", True):
+            threading.Thread(target=self._play_next_in_series, args=(item_id,), daemon=True).start()
+
+    def _play_next_in_series(self, item_id):
+        try:
+            next_id = self.api.next_in_series(item_id)
+        except (AuthError, ApiError) as exc:
+            log.info("series lookup failed: %s", exc)
+            return
+        if not next_id or self.stop_flag.is_set():
+            return
+        with self.lock:
+            if self.status != "idle":
+                return
+        self.start_item(next_id)
 
     def _mark_finished(self, item_id):
         try:
@@ -2866,6 +2939,11 @@ class App:
                 ),
             ),
             ps.MenuItem(
+                "Play Next in Series",
+                self.on_series_next,
+                checked=lambda item: bool(self.store.data.get("series_next", True)),
+            ),
+            ps.MenuItem(
                 "Discord",
                 ps.Menu(
                     ps.MenuItem(
@@ -3108,6 +3186,10 @@ class App:
             self.discord.submit(self.discord_payload())
         except Exception:
             log.exception("discord update failed")
+
+    def on_series_next(self, icon=None, item=None):
+        self.store.data["series_next"] = not self.store.data.get("series_next", True)
+        self.store.save()
 
     def on_discord_show(self, icon=None, item=None):
         self.store.data["discord_show"] = not self.store.data.get("discord_show", True)

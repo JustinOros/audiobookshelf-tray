@@ -13,6 +13,7 @@ It talks to the Audiobookshelf REST API directly and plays the stream through mp
 - With nothing in progress, Play opens a search box so you can find a book by title
 - Right-click menu: Play/Pause, Search, Forward 30s, Back 30s, Now Playing, Quit
 - Forward 30s and Back 30s skip ahead or back 30 seconds, like Audible
+- When a book in a series finishes, the next book in the series starts automatically. Turn this off with Play Next in Series.
 - Now Playing shows a popup with the cover art, title and author
 - Progress syncs back to the server every few seconds and on pause, skips and quit, so other Audiobookshelf clients pick up where you left off
 - Books made of several audio files play straight through as one book
